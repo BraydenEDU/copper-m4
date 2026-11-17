@@ -136,9 +136,15 @@ embeddings, so their `ai_calls` rows have no cost.
 | Handoff | `lib/copper/assistant/ask.ts` | Runs Copper, and when it hands off, runs the Refund agent on the same conversation (`module: 4, feature: "refund-agent"` in `ai_calls`) |
 | Inline chat | `components/copper/ask-copper.tsx` | `<AskCopper inline refunds={...} />` renders the chat as a page panel and reports each refund decision back to the console |
 
-### Busy models
+### Switching models at a roadblock
 
-`lib/ai/call.ts` moves a call to `FALLBACK_MODEL` (Gemini 3.5 Flash-Lite) when
-Google answers 503 (overloaded) or 429 (quota), or when a model hasn't started
-answering within 15 seconds, and skips a busy model for a minute. Without this,
-the chat sat on "Reading your question…" while Gemini 3.8 Flash kept failing.
+Every model call in `lib/ai/call.ts` switches to another approved model
+whenever the one it's using hits a roadblock: Google says it's busy (503) or
+out of free quota (429), the model is retired (404), a server or network error,
+an error where the answer should start, or no answer within 15 seconds (30 for
+non-streaming calls). The order is the chosen model, then `FALLBACK_MODEL`
+(Gemini 3.5 Flash-Lite), then the rest newest first; a model that just failed
+goes to the back of the line for a minute. Each switch prints an
+`[ai] … hit a roadblock` line, and `ai_calls` records the model that actually
+answered. Only a missing key or a cancelled request stops it straight away.
+Tests: `tests/model-switching.test.ts`.

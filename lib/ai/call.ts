@@ -82,37 +82,40 @@ export function isOverloaded(error: unknown): boolean {
   );
 }
 
-/** After an overload, skip the busy model for this long (per server instance). */
+/** After a model hits a roadblock, try it last for this long (per server instance). */
 const SKIP_BUSY_MS = 60_000;
 const busyUntil = new Map<ModelId, number>();
 
-/** How long one attempt may wait for its first piece of answer. */
+/** How long one streaming attempt may wait for its first piece of answer. */
 const FIRST_CHUNK_MS = 15_000;
+/** How long one non-streaming attempt may take in all. */
+const GENERATE_MS = 30_000;
 
 class SlowModelError extends Error {}
 
 type GoogleModel = ReturnType<typeof googleModel>;
 type StreamParams = Parameters<GoogleModel["doStream"]>[0];
 type StreamResult = Awaited<ReturnType<GoogleModel["doStream"]>>;
+type StreamPart =
+  StreamResult["stream"] extends ReadableStream<infer P> ? P : never;
 type GenerateParams = Parameters<GoogleModel["doGenerate"]>[0];
 type GenerateResult = Awaited<ReturnType<GoogleModel["doGenerate"]>>;
 
-/** Runs `start` with its own abort signal, cancelled after FIRST_CHUNK_MS. */
+/** Runs `start` with its own abort signal, cancelled after `ms`. */
 async function withDeadline<T>(
   outer: AbortSignal | undefined,
   start: (signal: AbortSignal) => Promise<T>,
-  ms = FIRST_CHUNK_MS,
-): Promise<{ value: T; settle: () => void }> {
+  ms: number,
+): Promise<T> {
   const controller = new AbortController();
   const onOuterAbort = () => controller.abort(outer?.reason);
   outer?.addEventListener("abort", onOuterAbort);
   const timer = setTimeout(
-    () => controller.abort(new SlowModelError("timed out")),
+    () => controller.abort(new SlowModelError(`no answer within ${ms} ms`)),
     ms,
   );
-  const settle = () => clearTimeout(timer);
   try {
-    const value = await Promise.race([
+    return await Promise.race([
       start(controller.signal),
       new Promise<never>((_, reject) =>
         controller.signal.addEventListener("abort", () =>
@@ -120,35 +123,50 @@ async function withDeadline<T>(
         ),
       ),
     ]);
-    return { value, settle };
   } catch (error) {
-    settle();
     outer?.removeEventListener("abort", onOuterAbort);
     throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-/** One streaming attempt that must deliver its first part within the deadline. */
+/** Parts that arrive before the model has actually said anything. */
+const PREAMBLE = new Set(["stream-start", "response-metadata"]);
+
+/**
+ * One streaming attempt. It must start answering within FIRST_CHUNK_MS, and
+ * an error in place of the first real part counts as a failed attempt, so the
+ * next model can take over before anything reaches the screen.
+ */
 async function streamAttempt(
   model: GoogleModel,
   params: StreamParams,
 ): Promise<StreamResult> {
-  const { value, settle } = await withDeadline(
+  const { result, reader, held } = await withDeadline(
     params.abortSignal,
     async (abortSignal) => {
       const result = await model.doStream({ ...params, abortSignal });
       const reader = result.stream.getReader();
-      const first = await reader.read();
-      return { result, reader, first };
+      const held: StreamPart[] = [];
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        if (next.value.type === "error") {
+          void reader.cancel().catch(() => {});
+          throw next.value.error;
+        }
+        held.push(next.value);
+        if (!PREAMBLE.has(next.value.type)) break;
+      }
+      return { result, reader, held };
     },
+    FIRST_CHUNK_MS,
   );
-  settle();
-  const { result, reader, first } = value;
-  // Put the first part back in front of the rest of the stream.
-  const stream = new ReadableStream<(typeof first)["value"] & object>({
+  // Put the held parts back in front of the rest of the stream.
+  const stream = new ReadableStream<StreamPart>({
     start(controller) {
-      if (first.done) controller.close();
-      else controller.enqueue(first.value);
+      for (const part of held) controller.enqueue(part);
     },
     async pull(controller) {
       const next = await reader.read();
@@ -157,66 +175,86 @@ async function streamAttempt(
     },
     cancel: (reason) => reader.cancel(reason),
   });
-  return { ...result, stream } as StreamResult;
+  return { ...result, stream };
 }
 
-async function generateAttempt(
+function generateAttempt(
   model: GoogleModel,
   params: GenerateParams,
 ): Promise<GenerateResult> {
-  const { value, settle } = await withDeadline(
+  return withDeadline(
     params.abortSignal,
     async (abortSignal) => model.doGenerate({ ...params, abortSignal }),
-    60_000,
+    GENERATE_MS,
   );
-  settle();
-  return value;
-}
-
-/** Busy, over quota, or too slow to answer: worth trying another model. */
-function shouldTryNext(error: unknown): boolean {
-  return isOverloaded(error) || error instanceof SlowModelError;
 }
 
 /**
- * The model to call. When Google says the chosen model is overloaded or out
- * of free quota, or it doesn't start answering within FIRST_CHUNK_MS, the
- * request moves on to FALLBACK_MODEL (tried twice), so the chat never sits on
- * "Reading your question…" for minutes.
+ * The approved models to try, in order: the chosen one, then the fallback,
+ * then the rest, newest first. Models that hit a roadblock in the last minute go last.
  */
-function languageModel(model: ModelId) {
-  const primary = googleModel(model);
-  const fallback = googleModel(FALLBACK_MODEL);
-  const skipPrimary =
-    model === FALLBACK_MODEL || (busyUntil.get(model) ?? 0) > Date.now();
-  const order = skipPrimary
-    ? [fallback, fallback]
-    : [primary, fallback, fallback];
+export function modelOrder(chosen: ModelId, now = Date.now()): ModelId[] {
+  const newestFirst = MODELS.map((m) => m.id).reverse();
+  const all = [chosen, FALLBACK_MODEL, ...newestFirst].filter(
+    (id, i, list) => list.indexOf(id) === i,
+  );
+  const ready = all.filter((id) => (busyUntil.get(id) ?? 0) <= now);
+  return [...ready, ...all.filter((id) => !ready.includes(id))];
+}
 
-  async function attempt<T>(run: (m: GoogleModel) => Promise<T>): Promise<T> {
+/** Why a model was passed over, for the terminal log. */
+function whyFailed(error: unknown): string {
+  if (error instanceof SlowModelError) return "too slow";
+  if (APICallError.isInstance(error)) {
+    if (error.statusCode === 503) return "overloaded (503)";
+    if (error.statusCode === 429) return "out of quota (429)";
+    if (error.statusCode) return `refused the request (${error.statusCode})`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The model to call. Whenever the chosen model hits a roadblock (busy, out of
+ * quota, retired, a server error, a bad response, or no answer in time), the
+ * same request moves on to the next approved model, until one answers or all
+ * have been tried. `onAnswer` hears which model actually answered.
+ * Only a missing key or the caller cancelling stops it straight away.
+ */
+function languageModel(model: ModelId, onAnswer?: (used: ModelId) => void) {
+  async function attempt<T>(
+    signal: AbortSignal | undefined,
+    run: (m: GoogleModel) => Promise<T>,
+  ): Promise<T> {
+    const order = modelOrder(model);
     let lastError: unknown;
-    for (const [i, candidate] of order.entries()) {
+    for (const [i, id] of order.entries()) {
       try {
-        return await run(candidate);
+        const result = await run(googleModel(id));
+        busyUntil.delete(id);
+        onAnswer?.(id);
+        return result;
       } catch (error) {
-        if (!shouldTryNext(error)) throw error;
+        if (error instanceof AiNotConfiguredError || signal?.aborted)
+          throw error;
         lastError = error;
-        if (candidate === primary)
-          busyUntil.set(model, Date.now() + SKIP_BUSY_MS);
-        const why = error instanceof SlowModelError ? "too slow" : "overloaded";
-        const next = order[i + 1] === primary ? model : FALLBACK_MODEL;
-        if (i + 1 < order.length)
-          console.warn(`[ai] ${candidate.modelId} was ${why}; trying ${next}`);
+        busyUntil.set(id, Date.now() + SKIP_BUSY_MS);
+        const next = order[i + 1];
+        console.warn(
+          `[ai] ${id} hit a roadblock: ${whyFailed(error)}.` +
+            (next ? ` Switching to ${next}.` : " No models left to try."),
+        );
       }
     }
     throw lastError;
   }
 
   return wrapLanguageModel({
-    model: primary,
+    model: googleModel(model),
     middleware: {
-      wrapGenerate: ({ params }) => attempt((m) => generateAttempt(m, params)),
-      wrapStream: ({ params }) => attempt((m) => streamAttempt(m, params)),
+      wrapGenerate: ({ params }) =>
+        attempt(params.abortSignal, (m) => generateAttempt(m, params)),
+      wrapStream: ({ params }) =>
+        attempt(params.abortSignal, (m) => streamAttempt(m, params)),
     },
   });
 }
@@ -231,22 +269,21 @@ type Usage = { inputTokens?: number; outputTokens?: number };
 /** Builds the ai_calls row for a call that started at `started`. */
 function rowFor(
   info: CallInfo,
-  model: ModelId | EmbeddingModelId,
+  model: ModelId | EmbeddingModelId | (() => ModelId),
   started: number,
 ) {
   return (ok: boolean, usage?: Usage): AiCallRow => {
+    const used = typeof model === "function" ? model() : model;
     const input = usage?.inputTokens ?? null;
     const output = usage?.outputTokens ?? null;
     return {
       module: info.module,
       feature: info.feature,
-      model,
+      model: used,
       input_tokens: input,
       output_tokens: output,
       cost_usd:
-        input !== null && output !== null
-          ? costUsd(model, input, output)
-          : null,
+        input !== null && output !== null ? costUsd(used, input, output) : null,
       latency_ms: Math.round(performance.now() - started),
       ok,
       created_at: new Date().toISOString(),
@@ -256,12 +293,12 @@ function rowFor(
 
 async function tracked<T extends { usage: Usage }>(
   info: CallInfo,
-  run: (model: ModelId) => Promise<T>,
+  run: (model: ReturnType<typeof languageModel>) => Promise<T>,
 ): Promise<T> {
-  const model = info.model ?? defaultModel();
-  const row = rowFor(info, model, performance.now());
+  let used = info.model ?? defaultModel();
+  const row = rowFor(info, () => used, performance.now());
   try {
-    const result = await run(model);
+    const result = await run(languageModel(used, (m) => (used = m)));
     await logCall(row(true, result.usage));
     return result;
   } catch (error) {
@@ -270,10 +307,14 @@ async function tracked<T extends { usage: Usage }>(
   }
 }
 
+// Switching models replaces the SDK's own retries, which would only ask the
+// same busy models again. A call can still pass its own maxRetries.
+const NO_RETRIES = { maxRetries: 0 };
+
 /** Generates text. Example: callText({ module: 3, feature: "support-answer" }, { prompt }) */
 export async function callText(info: CallInfo, options: TextOptions) {
   return tracked(info, (model) =>
-    generateText({ ...options, model: languageModel(model) }),
+    generateText({ ...NO_RETRIES, ...options, model }),
   );
 }
 
@@ -285,8 +326,9 @@ export async function callObject<Schema extends z.ZodType>(
   const { schema, ...rest } = options;
   const result = await tracked(info, (model) =>
     generateText({
+      ...NO_RETRIES,
       ...rest,
-      model: languageModel(model),
+      model,
       output: Output.object({ schema }),
     }),
   );
@@ -306,11 +348,12 @@ type StreamOptions = DistributiveOmit<
  * Example: callStream({ module: 2, feature: "ask-copper" }, { messages })
  */
 export function callStream(info: CallInfo, options: StreamOptions) {
-  const model = info.model ?? defaultModel();
-  const row = rowFor(info, model, performance.now());
+  let used = info.model ?? defaultModel();
+  const row = rowFor(info, () => used, performance.now());
   return streamText({
+    ...NO_RETRIES,
     ...options,
-    model: languageModel(model),
+    model: languageModel(used, (m) => (used = m)),
     onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),
     onError: () => logCall(row(false)),
   });
