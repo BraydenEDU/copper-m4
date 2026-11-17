@@ -8,6 +8,7 @@ import {
   ArrowLeftIcon,
   ArrowRightIcon,
   ArrowUpIcon,
+  ArrowRightLeftIcon,
   BrainIcon,
   FileTextIcon,
   MessageCircleIcon,
@@ -31,9 +32,11 @@ import { readLive } from "@/lib/ai/live";
 import { askCopper, type ChatMessage } from "@/lib/copper/assistant/ask";
 import {
   type Progress,
+  REFUND_TOOL_LABELS,
   type ToolStep,
   TOOL_LABELS,
 } from "@/lib/copper/assistant/progress";
+import type { RefundDecision, RefundState } from "@/lib/copper/refunds/orders";
 import { formatUsd, getPlans, getProducts } from "@/lib/copper/catalog";
 import { splitCitations } from "@/lib/copper/citations";
 import { cn } from "@/lib/utils";
@@ -52,11 +55,21 @@ const WORKING: Progress = { steps: [], reply: "", status: "working" };
 export function AskCopper({
   aiConfigured,
   inline = false,
+  refunds,
+  onRefundDecision,
 }: {
   aiConfigured: boolean;
   /** Show the chat as a panel on the page instead of a floating sheet. */
   inline?: boolean;
+  /** Module 4: the Refund Console's state. Turns on the Refund agent. */
+  refunds?: RefundState;
+  /** Called once for each refund the app decides during a chat. */
+  onRefundDecision?: (decision: RefundDecision) => void;
 }) {
+  const applied = useRef(new Set<string>());
+  const starters = refunds
+    ? ["I'd like a refund on order #1003, please.", ...STARTERS.slice(0, 2)]
+    : STARTERS;
   const [open, setOpen] = useState(false);
   const Title = inline ? "h2" : SheetTitle;
   const Description = inline ? "p" : SheetDescription;
@@ -119,8 +132,23 @@ export function AskCopper({
       const { progress } = await askCopper({
         messages,
         useTools: chat === "tools",
+        refunds,
       });
-      for await (const update of readLive(progress)) setProgress(update);
+      for await (const update of readLive(progress)) {
+        setProgress(update);
+        // Apply each finished refund to the console, once.
+        for (const step of update.steps) {
+          if (
+            step.type === "tool" &&
+            step.name === "request_refund" &&
+            step.state === "done" &&
+            !applied.current.has(step.id)
+          ) {
+            applied.current.add(step.id);
+            onRefundDecision?.(step.output as RefundDecision);
+          }
+        }
+      }
     } catch {
       setProgress({
         steps: [],
@@ -184,7 +212,11 @@ export function AskCopper({
                 <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
                   {turn.question}
                 </p>
-                <Answer progress={turn.progress} useTools={useTools} />
+                <Answer
+                  progress={turn.progress}
+                  useTools={useTools}
+                  refunds={!!refunds}
+                />
               </div>
             ))}
             {!busy && (
@@ -195,7 +227,7 @@ export function AskCopper({
                     Try one of these:
                   </p>
                 )}
-                {STARTERS.map((starter) => (
+                {starters.map((starter) => (
                   <button
                     key={starter}
                     type="button"
@@ -282,10 +314,20 @@ export function AskCopper({
 function Answer({
   progress,
   useTools,
+  refunds,
 }: {
   progress: Progress;
   useTools: boolean;
+  refunds: boolean;
 }) {
+  const handedOff = progress.steps.some((s) => s.type === "handoff");
+  const toolNames = Object.keys(
+    refunds
+      ? handedOff
+        ? REFUND_TOOL_LABELS
+        : { ...TOOL_LABELS, transfer_to_refund_agent: "" }
+      : TOOL_LABELS,
+  );
   const { steps, reply, status } = progress;
   const used = new Set(
     steps.filter((s): s is ToolStep => s.type === "tool").map((s) => s.name),
@@ -312,7 +354,7 @@ function Answer({
           }
         >
           <div className="flex flex-wrap gap-1.5">
-            {Object.keys(TOOL_LABELS).map((name) => (
+            {toolNames.map((name) => (
               <span
                 key={name}
                 className={cn(
@@ -351,6 +393,25 @@ function Answer({
                 className="text-muted-foreground border-l-2 pl-3 text-sm whitespace-pre-wrap italic"
               >
                 <InlineMarkdown text={step.text} />
+              </p>
+            </Station>
+          ) : step.type === "handoff" ? (
+            <Station
+              key={i}
+              node={<ArrowRightLeftIcon className="size-3" />}
+              nodeClass="bg-chart-5"
+              label={`Copper handed off to the ${step.to}`}
+            >
+              <p className="text-muted-foreground text-sm">
+                The {step.to} has its own instructions and tools:{" "}
+                {Object.keys(REFUND_TOOL_LABELS)
+                  .slice(1)
+                  .map((name) => (
+                    <code key={name} className="mx-0.5 font-mono text-xs">
+                      {name}
+                    </code>
+                  ))}
+                .
               </p>
             </Station>
           ) : (
@@ -395,7 +456,9 @@ function Answer({
 
       {(reply || !working) && (
         <div className="bg-card ml-2 rounded-2xl rounded-tl-sm border p-4 shadow-xs">
-          <p className="text-primary mb-1 text-xs font-bold">Copper</p>
+          <p className="text-primary mb-1 text-xs font-bold">
+            {handedOff ? "Refund agent" : "Copper"}
+          </p>
           {!useTools && (
             <div className="border-chart-3 bg-chart-3/10 mb-3 rounded-lg border p-3 text-xs">
               <p className="flex items-center gap-1.5 font-bold">
@@ -505,7 +568,9 @@ function ToolCard({ step, number }: { step: ToolStep; number: number }) {
           tool {number}
         </span>
         <span className="ml-auto text-xs text-white/80">
-          {TOOL_LABELS[step.name] ?? "Using a tool"}
+          {TOOL_LABELS[step.name] ??
+            REFUND_TOOL_LABELS[step.name] ??
+            "Using a tool"}
         </span>
       </div>
       <div className="space-y-2 px-3 py-3">
@@ -686,6 +751,8 @@ function ToolOutput({ name, output }: { name: string; output: any }) {
         ))}
       </ol>
     );
+  if (name === "request_refund" && output?.status)
+    return <RefundResult decision={output} />;
   // A tool without its own layout yet: show what came back as plain text.
   return (
     <pre className="max-h-48 overflow-auto text-xs whitespace-pre-wrap">
@@ -734,5 +801,39 @@ function Pill({
     >
       {children}
     </span>
+  );
+}
+
+const REFUND_TEXT: Record<RefundDecision["status"], string> = {
+  refunded: "Refunded automatically: at or under the limit",
+  pending: "Over the limit: waiting for the support team",
+  already_refunded: "Already refunded: nothing done",
+  already_pending: "Already waiting for approval: nothing done",
+  already_rejected: "Already rejected by the support team: nothing done",
+  not_found: "No order with that number",
+};
+
+function RefundResult({ decision }: { decision: RefundDecision }) {
+  return (
+    <div className="space-y-1 text-xs">
+      {"item" in decision && (
+        <div className="flex justify-between">
+          <span>
+            #{decision.orderId} {decision.item}
+          </span>
+          <span className="font-mono">{formatUsd(decision.amountUsd)}</span>
+        </div>
+      )}
+      <p
+        className={cn(
+          "font-semibold",
+          decision.status === "refunded" ? "text-accent" : "text-chart-3",
+        )}
+      >
+        {REFUND_TEXT[decision.status]}
+        {decision.status === "pending" &&
+          ` (limit ${formatUsd(decision.limitUsd)})`}
+      </p>
+    </div>
   );
 }

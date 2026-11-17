@@ -27,6 +27,9 @@ export const MODELS = [
 
 export type ModelId = (typeof MODELS)[number]["id"];
 
+/** Used automatically when the chosen model is overloaded or out of quota. */
+export const FALLBACK_MODEL: ModelId = "google/gemini-3.5-flash-lite";
+
 /**
  * The model that turns text into an embedding: a list of numbers that places
  * text with a similar meaning close together, so passages can be searched by

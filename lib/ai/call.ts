@@ -1,9 +1,17 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { embedMany, generateText, Output, streamText } from "ai";
+import {
+  APICallError,
+  embedMany,
+  generateText,
+  Output,
+  streamText,
+  wrapLanguageModel,
+} from "ai";
 import type { z } from "zod";
 import {
   defaultModel,
   EMBEDDING_MODEL,
+  FALLBACK_MODEL,
   type EmbeddingModelId,
   MODELS,
   type ModelId,
@@ -57,14 +65,160 @@ function google() {
   return createGoogleGenerativeAI({ apiKey: googleKey });
 }
 
-function languageModel(model: ModelId) {
-  const provider = google();
+function googleModel(model: ModelId) {
   const entry = MODELS.find((m) => m.id === model);
   const id =
     entry && "googleId" in entry
       ? entry.googleId
       : model.slice("google/".length);
-  return provider(id);
+  return google()(id);
+}
+
+/** Google's "too busy" (503) and "too many requests / quota used up" (429). */
+export function isOverloaded(error: unknown): boolean {
+  return (
+    APICallError.isInstance(error) &&
+    (error.statusCode === 503 || error.statusCode === 429)
+  );
+}
+
+/** After an overload, skip the busy model for this long (per server instance). */
+const SKIP_BUSY_MS = 60_000;
+const busyUntil = new Map<ModelId, number>();
+
+/** How long one attempt may wait for its first piece of answer. */
+const FIRST_CHUNK_MS = 15_000;
+
+class SlowModelError extends Error {}
+
+type GoogleModel = ReturnType<typeof googleModel>;
+type StreamParams = Parameters<GoogleModel["doStream"]>[0];
+type StreamResult = Awaited<ReturnType<GoogleModel["doStream"]>>;
+type GenerateParams = Parameters<GoogleModel["doGenerate"]>[0];
+type GenerateResult = Awaited<ReturnType<GoogleModel["doGenerate"]>>;
+
+/** Runs `start` with its own abort signal, cancelled after FIRST_CHUNK_MS. */
+async function withDeadline<T>(
+  outer: AbortSignal | undefined,
+  start: (signal: AbortSignal) => Promise<T>,
+  ms = FIRST_CHUNK_MS,
+): Promise<{ value: T; settle: () => void }> {
+  const controller = new AbortController();
+  const onOuterAbort = () => controller.abort(outer?.reason);
+  outer?.addEventListener("abort", onOuterAbort);
+  const timer = setTimeout(
+    () => controller.abort(new SlowModelError("timed out")),
+    ms,
+  );
+  const settle = () => clearTimeout(timer);
+  try {
+    const value = await Promise.race([
+      start(controller.signal),
+      new Promise<never>((_, reject) =>
+        controller.signal.addEventListener("abort", () =>
+          reject(controller.signal.reason),
+        ),
+      ),
+    ]);
+    return { value, settle };
+  } catch (error) {
+    settle();
+    outer?.removeEventListener("abort", onOuterAbort);
+    throw error;
+  }
+}
+
+/** One streaming attempt that must deliver its first part within the deadline. */
+async function streamAttempt(
+  model: GoogleModel,
+  params: StreamParams,
+): Promise<StreamResult> {
+  const { value, settle } = await withDeadline(
+    params.abortSignal,
+    async (abortSignal) => {
+      const result = await model.doStream({ ...params, abortSignal });
+      const reader = result.stream.getReader();
+      const first = await reader.read();
+      return { result, reader, first };
+    },
+  );
+  settle();
+  const { result, reader, first } = value;
+  // Put the first part back in front of the rest of the stream.
+  const stream = new ReadableStream<(typeof first)["value"] & object>({
+    start(controller) {
+      if (first.done) controller.close();
+      else controller.enqueue(first.value);
+    },
+    async pull(controller) {
+      const next = await reader.read();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
+  return { ...result, stream } as StreamResult;
+}
+
+async function generateAttempt(
+  model: GoogleModel,
+  params: GenerateParams,
+): Promise<GenerateResult> {
+  const { value, settle } = await withDeadline(
+    params.abortSignal,
+    async (abortSignal) => model.doGenerate({ ...params, abortSignal }),
+    60_000,
+  );
+  settle();
+  return value;
+}
+
+/** Busy, over quota, or too slow to answer: worth trying another model. */
+function shouldTryNext(error: unknown): boolean {
+  return isOverloaded(error) || error instanceof SlowModelError;
+}
+
+/**
+ * The model to call. When Google says the chosen model is overloaded or out
+ * of free quota, or it doesn't start answering within FIRST_CHUNK_MS, the
+ * request moves on to FALLBACK_MODEL (tried twice), so the chat never sits on
+ * "Reading your question…" for minutes.
+ */
+function languageModel(model: ModelId) {
+  const primary = googleModel(model);
+  const fallback = googleModel(FALLBACK_MODEL);
+  const skipPrimary =
+    model === FALLBACK_MODEL || (busyUntil.get(model) ?? 0) > Date.now();
+  const order = skipPrimary
+    ? [fallback, fallback]
+    : [primary, fallback, fallback];
+
+  async function attempt<T>(run: (m: GoogleModel) => Promise<T>): Promise<T> {
+    let lastError: unknown;
+    for (const [i, candidate] of order.entries()) {
+      try {
+        return await run(candidate);
+      } catch (error) {
+        if (!shouldTryNext(error)) throw error;
+        lastError = error;
+        if (candidate === primary)
+          busyUntil.set(model, Date.now() + SKIP_BUSY_MS);
+        const why = error instanceof SlowModelError ? "too slow" : "overloaded";
+        const next = order[i + 1] === primary ? model : FALLBACK_MODEL;
+        if (i + 1 < order.length)
+          console.warn(`[ai] ${candidate.modelId} was ${why}; trying ${next}`);
+      }
+    }
+    throw lastError;
+  }
+
+  return wrapLanguageModel({
+    model: primary,
+    middleware: {
+      wrapGenerate: ({ params }) => attempt((m) => generateAttempt(m, params)),
+      wrapStream: ({ params }) => attempt((m) => streamAttempt(m, params)),
+    },
+  });
 }
 
 /** Prints one line per model call, so the cost and time are visible. */

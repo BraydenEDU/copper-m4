@@ -14,7 +14,10 @@ export type ToolStep = {
   output?: unknown;
 };
 
-export type Step = ThinkingStep | ToolStep;
+/** Copper handed the conversation to another agent (Module 4). */
+export type HandoffStep = { type: "handoff"; to: string };
+
+export type Step = ThinkingStep | ToolStep | HandoffStep;
 
 export type Progress = {
   steps: Step[];
@@ -40,4 +43,11 @@ export const TOOL_LABELS: Record<string, string> = {
   calculate_cost: "Working out the cost",
   check_availability: "Checking stock",
   search_docs: "Searching the documents",
+};
+
+/** Module 4: the handoff and the Refund agent's tools. */
+export const REFUND_TOOL_LABELS: Record<string, string> = {
+  transfer_to_refund_agent: "Handing off to the Refund agent",
+  get_orders: "Looking up the orders",
+  request_refund: "Asking the app for a refund",
 };
