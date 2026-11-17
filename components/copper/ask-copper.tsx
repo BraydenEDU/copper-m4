@@ -616,6 +616,8 @@ const nameOf = (value: unknown) =>
 const NO_INPUT: Record<string, string> = {
   get_prices: "Nothing, it just asked for the price list",
   get_products: "Nothing, it just asked what Copper sells",
+  get_orders: "Nothing, it just asked for the customer's orders",
+  transfer_to_refund_agent: "Nothing, it just passed the chat along",
 };
 
 function ToolInput({ name, input }: { name: string; input: unknown }) {
@@ -751,6 +753,28 @@ function ToolOutput({ name, output }: { name: string; output: any }) {
         ))}
       </ol>
     );
+  if (name === "get_orders" && output?.orders)
+    return (
+      <div className="text-xs">
+        <p className="text-muted-foreground mb-1">{output.customer}</p>
+        {output.orders.map((order: any) => (
+          <div
+            key={order.id}
+            data-testid="order-row"
+            className="flex items-center gap-2 py-0.5"
+          >
+            <span className="font-mono">#{order.id}</span>
+            <span className="flex-1">{order.item}</span>
+            <RefundPill refund={order.refund} />
+            <span className="w-14 text-right font-mono">
+              {formatUsd(order.amountUsd)}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  if (name === "transfer_to_refund_agent")
+    return <p className="text-xs">Passed to the Refund agent</p>;
   if (name === "request_refund" && output?.status)
     return <RefundResult decision={output} />;
   // A tool without its own layout yet: show what came back as plain text.
@@ -783,6 +807,18 @@ function StockPill({
   return (
     <Pill className="bg-chart-3 text-white">Back-ordered until {date}</Pill>
   );
+}
+
+const REFUND_PILL: Record<string, { label: string; className: string }> = {
+  none: { label: "Paid", className: "bg-background border" },
+  refunded: { label: "Refunded", className: "bg-accent text-white" },
+  pending: { label: "Waiting", className: "bg-chart-4 text-chart-5" },
+  rejected: { label: "Rejected", className: "bg-chart-3 text-white" },
+};
+
+function RefundPill({ refund }: { refund: string }) {
+  const pill = REFUND_PILL[refund] ?? REFUND_PILL.none;
+  return <Pill className={pill.className}>{pill.label}</Pill>;
 }
 
 function Pill({
