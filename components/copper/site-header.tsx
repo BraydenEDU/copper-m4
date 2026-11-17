@@ -6,10 +6,11 @@ import { cn } from "@/lib/utils";
 // Four links don't fit beside the logo on a phone, so two section links are
 // hidden there.
 const LINKS = [
-  { href: "#products", label: "Products" },
-  { href: "#plus", label: "Copper Plus", phone: false },
-  { href: "#privacy", label: "Privacy", phone: false },
-  { href: "#ask", label: "Ask Copper" },
+  { href: "/#products", label: "Products" },
+  { href: "/#plus", label: "Copper Plus", phone: false },
+  { href: "/#privacy", label: "Privacy", phone: false },
+  { href: "/support", label: "Support" },
+  { href: "/#ask", label: "Ask Copper" },
 ];
 
 export function SiteHeader() {

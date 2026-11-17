@@ -49,8 +49,17 @@ type Chats = { tools: Turn[]; noTools: Turn[] };
 
 const WORKING: Progress = { steps: [], reply: "", status: "working" };
 
-export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
+export function AskCopper({
+  aiConfigured,
+  inline = false,
+}: {
+  aiConfigured: boolean;
+  /** Show the chat as a panel on the page instead of a floating sheet. */
+  inline?: boolean;
+}) {
   const [open, setOpen] = useState(false);
+  const Title = inline ? "h2" : SheetTitle;
+  const Description = inline ? "p" : SheetDescription;
   const [useTools, setUseTools] = useState(true);
   const [chats, setChats] = useState<Chats>({ tools: [], noTools: [] });
   const [draft, setDraft] = useState("");
@@ -63,6 +72,7 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
   // Open from the header's #ask link or a page load at /#ask. Clicking the
   // link again fires no hashchange, so listen for the click too.
   useEffect(() => {
+    if (inline) return;
     const openOnHash = () => window.location.hash === "#ask" && setOpen(true);
     const openOnClick = (event: MouseEvent) => {
       if ((event.target as Element).closest?.('a[href$="#ask"]')) setOpen(true);
@@ -74,7 +84,7 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
       window.removeEventListener("hashchange", openOnHash);
       document.removeEventListener("click", openOnClick);
     };
-  }, []);
+  }, [inline]);
 
   useEffect(() => {
     if (body.current) body.current.scrollTop = body.current.scrollHeight;
@@ -120,6 +130,127 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
     }
   }
 
+  const panel = (
+    <>
+      <header className="bg-chart-5 dark:bg-background text-white">
+        <div className="flex items-center gap-3 px-4 pt-4 pb-3">
+          <span className="bg-primary flex size-10 shrink-0 items-center justify-center rounded-full">
+            <MessageCircleIcon className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <Title className="text-base font-bold text-white">Ask Copper</Title>
+            <Description className="text-xs text-white/70">
+              Prices, totals and stock, checked with tools.
+            </Description>
+          </div>
+          {!inline && (
+            <SheetClose asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-white hover:bg-white/10 hover:text-white"
+              >
+                <XIcon />
+                <span className="sr-only">Close</span>
+              </Button>
+            </SheetClose>
+          )}
+        </div>
+        {aiConfigured && (
+          <div className="flex items-center gap-3 bg-white/10 px-4 py-2">
+            <div className="flex-1 text-sm">
+              <span className="font-semibold">Use tools</span>
+              <span className="ml-2 text-xs text-white/70">
+                {useTools ? "Checks every answer" : "Model guesses alone"}
+              </span>
+            </div>
+            <Switch
+              aria-label="Use tools"
+              checked={useTools}
+              onCheckedChange={setUseTools}
+            />
+          </div>
+        )}
+      </header>
+
+      {aiConfigured ? (
+        <>
+          <div
+            ref={body}
+            className="bg-secondary flex-1 space-y-6 overflow-y-auto px-4 py-5"
+          >
+            {turns.map((turn, i) => (
+              <div key={i} className="space-y-4">
+                <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
+                  {turn.question}
+                </p>
+                <Answer progress={turn.progress} useTools={useTools} />
+              </div>
+            ))}
+            {!busy && (
+              <div className="space-y-2">
+                {turns.length === 0 && (
+                  <p className="text-muted-foreground text-sm">
+                    Hi, I&apos;m Copper! Ask me about prices, totals or stock.
+                    Try one of these:
+                  </p>
+                )}
+                {STARTERS.map((starter) => (
+                  <button
+                    key={starter}
+                    type="button"
+                    onClick={() => send(starter)}
+                    className="bg-background hover:border-primary block w-full rounded-xl border px-3 py-2 text-left text-sm transition-colors"
+                  >
+                    {starter}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              send(draft);
+            }}
+            className="bg-background flex items-center gap-2 border-t p-3"
+          >
+            <input
+              aria-label="Your question"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder="Ask about prices or stock…"
+              className="bg-background focus-visible:ring-ring h-10 flex-1 rounded-full border px-4 text-sm outline-none focus-visible:ring-2"
+            />
+            <Button
+              type="submit"
+              size="icon"
+              aria-label="Send"
+              disabled={busy || !draft.trim()}
+              className="size-10 rounded-full"
+            >
+              <ArrowUpIcon />
+            </Button>
+          </form>
+        </>
+      ) : (
+        <div className="bg-secondary flex-1 overflow-y-auto px-4">
+          <SetupRequired service="ai" />
+        </div>
+      )}
+    </>
+  );
+
+  if (inline)
+    return (
+      <div
+        data-testid="ask-copper"
+        className="bg-background flex h-full min-h-0 flex-col"
+      >
+        {panel}
+      </div>
+    );
+
   return (
     <>
       {!open && (
@@ -140,112 +271,7 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
           showCloseButton={false}
           className="gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md"
         >
-          <header className="bg-chart-5 dark:bg-background text-white">
-            <div className="flex items-center gap-3 px-4 pt-4 pb-3">
-              <span className="bg-primary flex size-10 shrink-0 items-center justify-center rounded-full">
-                <MessageCircleIcon className="size-5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <SheetTitle className="text-base font-bold text-white">
-                  Ask Copper
-                </SheetTitle>
-                <SheetDescription className="text-xs text-white/70">
-                  Prices, totals and stock, checked with tools.
-                </SheetDescription>
-              </div>
-              <SheetClose asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-white hover:bg-white/10 hover:text-white"
-                >
-                  <XIcon />
-                  <span className="sr-only">Close</span>
-                </Button>
-              </SheetClose>
-            </div>
-            {aiConfigured && (
-              <div className="flex items-center gap-3 bg-white/10 px-4 py-2">
-                <div className="flex-1 text-sm">
-                  <span className="font-semibold">Use tools</span>
-                  <span className="ml-2 text-xs text-white/70">
-                    {useTools ? "Checks every answer" : "Model guesses alone"}
-                  </span>
-                </div>
-                <Switch
-                  aria-label="Use tools"
-                  checked={useTools}
-                  onCheckedChange={setUseTools}
-                />
-              </div>
-            )}
-          </header>
-
-          {aiConfigured ? (
-            <>
-              <div
-                ref={body}
-                className="bg-secondary flex-1 space-y-6 overflow-y-auto px-4 py-5"
-              >
-                {turns.map((turn, i) => (
-                  <div key={i} className="space-y-4">
-                    <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
-                      {turn.question}
-                    </p>
-                    <Answer progress={turn.progress} useTools={useTools} />
-                  </div>
-                ))}
-                {!busy && (
-                  <div className="space-y-2">
-                    {turns.length === 0 && (
-                      <p className="text-muted-foreground text-sm">
-                        Hi, I&apos;m Copper! Ask me about prices, totals or
-                        stock. Try one of these:
-                      </p>
-                    )}
-                    {STARTERS.map((starter) => (
-                      <button
-                        key={starter}
-                        type="button"
-                        onClick={() => send(starter)}
-                        className="bg-background hover:border-primary block w-full rounded-xl border px-3 py-2 text-left text-sm transition-colors"
-                      >
-                        {starter}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  send(draft);
-                }}
-                className="bg-background flex items-center gap-2 border-t p-3"
-              >
-                <input
-                  aria-label="Your question"
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Ask about prices or stock…"
-                  className="bg-background focus-visible:ring-ring h-10 flex-1 rounded-full border px-4 text-sm outline-none focus-visible:ring-2"
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  aria-label="Send"
-                  disabled={busy || !draft.trim()}
-                  className="size-10 rounded-full"
-                >
-                  <ArrowUpIcon />
-                </Button>
-              </form>
-            </>
-          ) : (
-            <div className="bg-secondary flex-1 overflow-y-auto px-4">
-              <SetupRequired service="ai" />
-            </div>
-          )}
+          {panel}
         </SheetContent>
       </Sheet>
     </>

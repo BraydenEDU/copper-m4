@@ -125,3 +125,10 @@ the same model.
 **Risks and open questions:** If a PDF changes, run `npm run passages` again or
 answers will cite stale text. Google doesn't report token counts for
 embeddings, so their `ai_calls` rows have no cost.
+
+## Module 4: the Refund Console
+
+| Piece | Where | What it does |
+|---|---|---|
+| Support page | `app/support/page.tsx` | The Refund Console (empty for now) with Ask Copper inline on the right |
+| Inline chat | `components/copper/ask-copper.tsx` | `<AskCopper inline />` renders the Module 3 chat as a page panel instead of the floating sheet |
