@@ -141,7 +141,7 @@ embeddings, so their `ai_calls` rows have no cost.
 Every model call in `lib/ai/call.ts` switches to another approved model
 whenever the one it's using hits a roadblock: Google says it's busy (503) or
 out of free quota (429), the model is retired (404), a server or network error,
-an error where the answer should start, or no answer within 15 seconds (30 for
+an error where the answer should start, or no answer within 8 seconds (30 for
 non-streaming calls). The order is the chosen model, then `FALLBACK_MODEL`
 (Gemini 3.5 Flash-Lite), then the rest newest first; a model that just failed
 goes to the back of the line for a minute. Each switch prints an

@@ -87,7 +87,7 @@ const SKIP_BUSY_MS = 60_000;
 const busyUntil = new Map<ModelId, number>();
 
 /** How long one streaming attempt may wait for its first piece of answer. */
-const FIRST_CHUNK_MS = 15_000;
+const FIRST_CHUNK_MS = 8_000;
 /** How long one non-streaming attempt may take in all. */
 const GENERATE_MS = 30_000;
 
