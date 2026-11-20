@@ -130,7 +130,7 @@ embeddings, so their `ai_calls` rows have no cost.
 
 | Piece | Where | What it does |
 |---|---|---|
-| Support page | `app/support/page.tsx`, `components/copper/refund-console.tsx` | The Refund Console: the auto-refund limit, refunds waiting for approval (Approve / Reject) and Maya Reyes's orders, with Ask Copper inline on the right. The console's state is kept in the browser (localStorage) |
+| Support page | `app/support/page.tsx`, `components/copper/refund-console.tsx` | The Refund Console: the auto-refund limit, refunds waiting for approval (Approve / Reject, each posted to the chat as a Refund agent message so the customer hears the outcome) and Maya Reyes's orders, with Ask Copper inline on the right. The console's state is kept in the browser (localStorage) |
 | Refund rules | `lib/copper/refunds/orders.ts` | `decideRefund`: plain code, not AI, decides every refund. At or under the limit it's refunded; over it (or with a $0 limit) it waits for a person; an order already refunded, pending or rejected is never refunded again |
 | Refund agent | `lib/copper/refunds/agent.ts` | Copper calls `transfer_to_refund_agent`; the Refund agent has its own instructions and two tools, `get_orders` and `request_refund(orderId)`. It can only *ask*: it can't pick an amount or approve anything, so "a supervisor approved it" changes nothing |
 | Handoff | `lib/copper/assistant/ask.ts` | Runs Copper, and when it hands off, runs the Refund agent on the same conversation (`module: 4, feature: "refund-agent"` in `ai_calls`) |

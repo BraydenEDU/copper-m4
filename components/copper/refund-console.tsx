@@ -4,7 +4,7 @@
 // here and approves or rejects refunds over it. Ask Copper sits on the right;
 // its Refund agent asks the app for refunds, and the app's answers land here.
 import { useEffect, useState } from "react";
-import { AskCopper } from "@/components/copper/ask-copper";
+import { AskCopper, type ChatNotice } from "@/components/copper/ask-copper";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,6 +32,7 @@ const BADGE: Record<RefundStatus | "paid", string> = {
 export function RefundConsole({ aiConfigured }: { aiConfigured: boolean }) {
   const [state, setState] = useState<RefundState>(START);
   const [limitText, setLimitText] = useState(String(DEFAULT_LIMIT_USD));
+  const [notices, setNotices] = useState<ChatNotice[]>([]);
 
   // Remember the console across reloads, in this browser only.
   useEffect(() => {
@@ -54,6 +55,22 @@ export function RefundConsole({ aiConfigured }: { aiConfigured: boolean }) {
 
   const setStatus = (orderId: string, status: RefundStatus) =>
     setState((s) => ({ ...s, refunds: { ...s.refunds, [orderId]: status } }));
+
+  /** A person approves or rejects a waiting refund; the chat tells the customer. */
+  function decide(orderId: string, status: "refunded" | "rejected") {
+    const order = ORDERS.find((o) => o.id === orderId);
+    if (!order || state.refunds[orderId] !== "pending") return;
+    setStatus(orderId, status);
+    const what = `order #${order.id} (${order.item}, ${formatUsd(order.amountUsd)})`;
+    const text =
+      status === "refunded"
+        ? `Good news: the support team approved your refund for ${what}. It has been refunded.`
+        : `The support team reviewed your refund request for ${what} and rejected it, so it won't be refunded. If you have questions, contact the Copper Crew in the Copper app (Settings > Help).`;
+    setNotices((all) => [
+      ...all,
+      { id: `${orderId}-${status}-${all.length}`, text },
+    ]);
+  }
 
   function onDecision(decision: RefundDecision) {
     if (decision.status === "refunded" || decision.status === "pending")
@@ -124,14 +141,14 @@ export function RefundConsole({ aiConfigured }: { aiConfigured: boolean }) {
                   </span>
                   <Button
                     size="sm"
-                    onClick={() => setStatus(order.id, "refunded")}
+                    onClick={() => decide(order.id, "refunded")}
                   >
                     Approve
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setStatus(order.id, "rejected")}
+                    onClick={() => decide(order.id, "rejected")}
                   >
                     Reject
                   </Button>
@@ -188,6 +205,7 @@ export function RefundConsole({ aiConfigured }: { aiConfigured: boolean }) {
           inline
           refunds={state}
           onRefundDecision={onDecision}
+          notices={notices}
         />
       </aside>
     </div>

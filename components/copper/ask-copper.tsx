@@ -47,7 +47,11 @@ const STARTERS = [
   "Is Copper Plus cheaper monthly or yearly?",
 ];
 
-type Turn = { question: string; progress: Progress };
+/** A notice is a message the app posts on its own, with no question before it. */
+type Turn = { question: string; progress: Progress; notice?: boolean };
+
+/** Module 4: something the support team did in the Refund Console. */
+export type ChatNotice = { id: string; text: string };
 type Chats = { tools: Turn[]; noTools: Turn[] };
 
 const WORKING: Progress = { steps: [], reply: "", status: "working" };
@@ -57,6 +61,7 @@ export function AskCopper({
   inline = false,
   refunds,
   onRefundDecision,
+  notices = [],
 }: {
   aiConfigured: boolean;
   /** Show the chat as a panel on the page instead of a floating sheet. */
@@ -65,8 +70,11 @@ export function AskCopper({
   refunds?: RefundState;
   /** Called once for each refund the app decides during a chat. */
   onRefundDecision?: (decision: RefundDecision) => void;
+  /** Messages to post to the customer, like "your refund was rejected". */
+  notices?: ChatNotice[];
 }) {
   const applied = useRef(new Set<string>());
+  const posted = useRef(new Set<string>());
   const starters = refunds
     ? ["I'd like a refund on order #1003, please.", ...STARTERS.slice(0, 2)]
     : STARTERS;
@@ -103,6 +111,25 @@ export function AskCopper({
     if (body.current) body.current.scrollTop = body.current.scrollHeight;
   }, [chats, useTools]);
 
+  // Post each new console decision to the chat (the one with tools, where
+  // the Refund agent works), so the customer hears about it right away.
+  useEffect(() => {
+    const fresh = notices.filter((n) => !posted.current.has(n.id));
+    if (fresh.length === 0) return;
+    for (const n of fresh) posted.current.add(n.id);
+    setChats((all) => ({
+      ...all,
+      tools: [
+        ...all.tools,
+        ...fresh.map((n): Turn => ({
+          question: "",
+          notice: true,
+          progress: { steps: [], reply: n.text, status: "done" },
+        })),
+      ],
+    }));
+  }, [notices]);
+
   async function send(question: string) {
     question = question.trim();
     if (!question || busy) return;
@@ -111,10 +138,14 @@ export function AskCopper({
     const index = turns.length;
     // Only finished turns go to the model: questions and Copper's replies.
     const messages: ChatMessage[] = [
-      ...turns.flatMap(({ question, progress }): ChatMessage[] => [
-        { role: "user", content: question },
-        { role: "assistant", content: progress.reply },
-      ]),
+      ...turns.flatMap(({ question, progress, notice }): ChatMessage[] =>
+        notice
+          ? [{ role: "assistant", content: progress.reply }]
+          : [
+              { role: "user", content: question },
+              { role: "assistant", content: progress.reply },
+            ],
+      ),
       { role: "user", content: question },
     ];
     const setProgress = (progress: Progress) =>
@@ -207,18 +238,34 @@ export function AskCopper({
             ref={body}
             className="bg-secondary flex-1 space-y-6 overflow-y-auto px-4 py-5"
           >
-            {turns.map((turn, i) => (
-              <div key={i} className="space-y-4">
-                <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
-                  {turn.question}
-                </p>
-                <Answer
-                  progress={turn.progress}
-                  useTools={useTools}
-                  refunds={!!refunds}
-                />
-              </div>
-            ))}
+            {turns.map((turn, i) =>
+              turn.notice ? (
+                <div
+                  key={i}
+                  data-testid="chat-notice"
+                  role="status"
+                  className="bg-card ml-2 rounded-2xl rounded-tl-sm border-l-4 border-l-primary p-4 shadow-xs"
+                >
+                  <p className="text-primary mb-1 text-xs font-bold">
+                    Refund agent · update from the support team
+                  </p>
+                  <p className="text-sm whitespace-pre-wrap">
+                    {turn.progress.reply}
+                  </p>
+                </div>
+              ) : (
+                <div key={i} className="space-y-4">
+                  <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
+                    {turn.question}
+                  </p>
+                  <Answer
+                    progress={turn.progress}
+                    useTools={useTools}
+                    refunds={!!refunds}
+                  />
+                </div>
+              ),
+            )}
             {!busy && (
               <div className="space-y-2">
                 {turns.length === 0 && (
